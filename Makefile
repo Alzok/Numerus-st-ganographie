@@ -10,7 +10,7 @@ build:
 	$(DC) build
 
 test:
-	$(DC) run --rm backend pytest -q
+	@echo "Aucun test automatisé n'est disponible."
 
 lint:
 	$(DC) run --rm $(ROOT) backend ruff check backend

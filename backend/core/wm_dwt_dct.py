@@ -9,11 +9,11 @@ import fitz  # PyMuPDF
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
-DEFAULT_BLOCK_SIZE = 8
-MAX_MESSAGE_BYTES = 4096
-OVERLAY_ALPHA = 12  # 0-255
-TEXT_STEP_Y = 120
-TEXT_PADDING = 36
+PAYLOAD_OVERHEAD_BYTES = 0
+OVERLAY_ALPHA = 4  # 0-255, keep extremely low opacity
+TEXT_STEP_Y = 160
+TEXT_PADDING = 24
+TEXT_FONT_SIZE = 6
 TEXT_MARKER_PREFIX = "__WM_START__"
 TEXT_MARKER_SUFFIX = "__WM_END__"
 
@@ -23,11 +23,7 @@ class WatermarkingError(RuntimeError):
 
 
 def _normalize_message(message: str) -> str:
-    data = message.encode("utf-8")
-    if len(data) > MAX_MESSAGE_BYTES:
-        raise WatermarkingError(
-            f"Message trop long ({len(data)} octets). Limite : {MAX_MESSAGE_BYTES} octets."
-        )
+    # No hard limit: rely on downstream metadata capacity and caller validation.
     return message
 
 
@@ -35,7 +31,15 @@ def _pattern(message: str) -> str:
     return f"{TEXT_MARKER_PREFIX}{message}{TEXT_MARKER_SUFFIX}"
 
 
-def embed_image(img_bgr: np.ndarray, message: str) -> Tuple[np.ndarray, Dict]:
+def _build_overlay_tile(marker: str, width: int) -> str:
+    wrap_width = max(32, width // 8)
+    return textwrap.fill(marker, width=wrap_width)
+
+
+def embed_image(
+    img_bgr: np.ndarray,
+    message: str,
+) -> Tuple[np.ndarray, Dict]:
     normalized = _normalize_message(message)
     height, width = img_bgr.shape[:2]
 
@@ -46,27 +50,25 @@ def embed_image(img_bgr: np.ndarray, message: str) -> Tuple[np.ndarray, Dict]:
     font = ImageFont.load_default()
 
     stamped = _pattern(normalized)
-    tile = textwrap.fill(stamped, width=120)
+    tile = _build_overlay_tile(stamped, width)
 
-    for y in range(0, height, TEXT_STEP_Y):
-        draw.text((TEXT_PADDING, y + TEXT_PADDING), tile, fill=(255, 255, 255, OVERLAY_ALPHA), font=font)
+    for y in range(0, height + TEXT_STEP_Y, TEXT_STEP_Y):
+        draw.text(
+            (TEXT_PADDING, y + TEXT_PADDING),
+            tile,
+            fill=(255, 255, 255, OVERLAY_ALPHA),
+            font=font,
+        )
 
     combined = Image.alpha_composite(base, overlay).convert("RGB")
     watermarked = cv2.cvtColor(np.array(combined), cv2.COLOR_RGB2BGR)
 
-    return watermarked, {"pattern": stamped}
-
-
-def encode_png_with_message(img_bgr: np.ndarray, message: str) -> bytes:
-    normalized = _normalize_message(message)
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    image = Image.fromarray(img_rgb)
-    buffer = BytesIO()
-    pnginfo = PngImagePlugin.PngInfo()
-    pnginfo.add_text("wm_message", normalized)
-    pnginfo.add_text("wm_pattern", _pattern(normalized))
-    image.save(buffer, format="PNG", pnginfo=pnginfo)
-    return buffer.getvalue()
+    return watermarked, {
+        "pattern": stamped,
+        "overlay_opacity_percent": round(OVERLAY_ALPHA / 255 * 100, 3),
+        "overlay_line_spacing": TEXT_STEP_Y,
+        "overlay_padding": TEXT_PADDING,
+    }
 
 
 def extract_from_png_bytes(data: bytes) -> str:
@@ -88,34 +90,29 @@ def extract_from_png_bytes(data: bytes) -> str:
     raise WatermarkingError("Aucune donnée cachée trouvée dans cette image.")
 
 
-def embed_pdf(frames: List[np.ndarray], message: str) -> bytes:
+def embed_pdf(
+    frames: List[np.ndarray],
+    message: str,
+) -> Tuple[bytes, Dict]:
     normalized = _normalize_message(message)
     doc = fitz.open()
-    marker = _pattern(normalized)
+    meta_overlay: Dict | None = None
 
     for frame in frames:
-        height, width = frame.shape[:2]
+        watermarked, overlay_meta = embed_image(frame, normalized)
+        meta_overlay = overlay_meta
+
+        height, width = watermarked.shape[:2]
         page = doc.new_page(width=width, height=height)
 
-        success, png_bytes = cv2.imencode(".png", frame)
+        success, png_bytes = cv2.imencode(".png", watermarked)
         if not success:
             raise WatermarkingError("Impossible de traiter l'image de la page.")
 
         rect = fitz.Rect(0, 0, width, height)
         page.insert_image(rect, stream=png_bytes.tobytes())
 
-        box = fitz.Rect(TEXT_PADDING, TEXT_PADDING, width - TEXT_PADDING, height - TEXT_PADDING)
-        page.insert_textbox(
-            box,
-            marker,
-            fontsize=12,
-            color=(1, 1, 1),
-            overlay=True,
-            render_mode=0,
-            align=fitz.TEXT_ALIGN_LEFT,
-            opacity=0.02,
-        )
-
+    marker = (meta_overlay or {}).get("pattern", _pattern(normalized))
     metadata = doc.metadata or {}
     metadata.update({"keywords": marker, "subject": marker})
     doc.set_metadata(metadata)
@@ -123,7 +120,12 @@ def embed_pdf(frames: List[np.ndarray], message: str) -> bytes:
     buffer = BytesIO()
     doc.save(buffer)
     doc.close()
-    return buffer.getvalue()
+    return buffer.getvalue(), meta_overlay or {
+        "pattern": marker,
+        "overlay_opacity_percent": round(OVERLAY_ALPHA / 255 * 100, 3),
+        "overlay_line_spacing": TEXT_STEP_Y,
+        "overlay_padding": TEXT_PADDING,
+    }
 
 
 def extract_from_pdf_bytes(data: bytes) -> str:
@@ -162,19 +164,6 @@ def _extract_from_marker(text: str | None) -> str | None:
     if end == -1:
         return None
     return text[start + len(TEXT_MARKER_PREFIX) : end].strip()
-
-
-def estimate_capacity(img_bgr: np.ndarray, _block_size: int) -> Dict[str, int]:
-    height, width = img_bgr.shape[:2]
-    approx_chars = (width * height) // 32
-    max_bytes = min(MAX_MESSAGE_BYTES, max(128, approx_chars))
-    return {
-        "capacity_bits": max_bytes * 8,
-        "max_message_bytes": max_bytes,
-        "max_message_bytes_per_replication": {1: max_bytes, 2: max_bytes // 2, 3: max_bytes // 3},
-        "even_width": width,
-        "even_height": height,
-    }
 
 
 def extract(message: bytes, *args, **kwargs):

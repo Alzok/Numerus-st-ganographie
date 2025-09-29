@@ -1,48 +1,22 @@
 "use client";
 
 import React from "react";
-import { Info } from "lucide-react";
-
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ToastProvider, useToast } from "@/components/ui/use-toast";
-import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 
-const BLOCK_OPTIONS = [8, 12, 16];
-const STRENGTH_MIN = 0.1;
-const STRENGTH_MAX = 2.0;
 const DEFAULT_MESSAGE = "Bonjour, ceci est un filigrane robuste.";
-const MESSAGE_LIMIT = 4096;
 
 const textEncoder = new TextEncoder();
 
 function countMessageBytes(value: string): number {
   return textEncoder.encode(value).length;
-}
-
-function clampToByteLimit(value: string, maxBytes: number): string {
-  if (maxBytes <= 0) {
-    return "";
-  }
-  let total = 0;
-  let result = "";
-  for (const char of value) {
-    const size = textEncoder.encode(char).length;
-    if (total + size > maxBytes) {
-      break;
-    }
-    result += char;
-    total += size;
-  }
-  return result;
 }
 
 function resolveApiBase() {
@@ -53,30 +27,6 @@ function resolveApiBase() {
   }
   return process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://backend:8080";
 }
-
-type Mode = "embed" | "extract";
-
-type EmbedOutcome = {
-  filename: string;
-  blob: Blob;
-  mime: string;
-  psnr?: number;
-  pageCount?: number;
-};
-
-type ExtractOutcome = {
-  message: string;
-  confidence: number;
-  pageIndex: number;
-};
-
-type CapacityInfo = {
-  capacityBits: number;
-  maxMessageBytes: number;
-  replicationFactor: number;
-  width: number;
-  height: number;
-};
 
 function base64ToBlob(base64: string, mime: string) {
   const binary = atob(base64);
@@ -91,131 +41,55 @@ function formatConfidence(value: number) {
   return `${Math.round(value * 1000) / 10}%`;
 }
 
-function formatPSNR(psnr?: number) {
-  if (psnr === undefined || Number.isNaN(psnr)) {
-    return "--";
-  }
+function formatPSNR(psnr?: number | null) {
+  if (psnr == null || Number.isNaN(psnr)) return "--";
   return `${psnr.toFixed(2)} dB`;
 }
+
+type Mode = "embed" | "extract";
+
+type EmbedOutcome = {
+  filename: string;
+  blob: Blob;
+  mime: string;
+  psnr?: number | null;
+  pageCount?: number;
+  pdfBlob?: Blob;
+  pdfFilename?: string;
+  pdfMime?: string;
+};
+
+type ExtractOutcome = {
+  message: string;
+  confidence: number;
+  pageIndex: number;
+};
 
 function Content() {
   const { toast } = useToast();
   const [mode, setMode] = React.useState<Mode>("embed");
   const [message, setMessage] = React.useState(DEFAULT_MESSAGE);
   const [messageBytes, setMessageBytes] = React.useState(() => countMessageBytes(DEFAULT_MESSAGE));
-  const [strength, setStrength] = React.useState(0.5);
-  const [blockSize, setBlockSize] = React.useState(8);
   const [file, setFile] = React.useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const [embedResult, setEmbedResult] = React.useState<EmbedOutcome | null>(null);
   const [extractResult, setExtractResult] = React.useState<ExtractOutcome | null>(null);
   const [formatHint, setFormatHint] = React.useState<string | null>(null);
-  const [capacityInfo, setCapacityInfo] = React.useState<CapacityInfo | null>(null);
-  const [capacityError, setCapacityError] = React.useState<string | null>(null);
-  const [isCapacityLoading, setIsCapacityLoading] = React.useState(false);
-  const [wasClamped, setWasClamped] = React.useState(false);
-  const capacityRequestId = React.useRef(0);
-
-  const maxMessageBytes = capacityInfo?.maxMessageBytes ?? null;
-  const messageLimit = maxMessageBytes ?? MESSAGE_LIMIT;
-  const isCapacityZero = maxMessageBytes === 0;
-  const isAtByteLimit = capacityInfo ? messageBytes === capacityInfo.maxMessageBytes : false;
-
   React.useEffect(() => {
     setMessageBytes(countMessageBytes(message));
   }, [message]);
-
-  React.useEffect(() => {
-    if (maxMessageBytes == null) {
-      setWasClamped(false);
-      return;
-    }
-    setMessage((current) => {
-      const clamped = clampToByteLimit(current, maxMessageBytes);
-      setWasClamped(clamped !== current);
-      return clamped;
-    });
-  }, [maxMessageBytes]);
 
   const resetResults = () => {
     setEmbedResult(null);
     setExtractResult(null);
   };
 
-  const fetchCapacity = React.useCallback(
-    async (targetFile: File, selectedBlockSize: number) => {
-      const requestId = capacityRequestId.current + 1;
-      capacityRequestId.current = requestId;
-      setIsCapacityLoading(true);
-      setCapacityError(null);
-
-      const formData = new FormData();
-      formData.append("image", targetFile);
-      formData.append("block_size", String(selectedBlockSize));
-
-      try {
-        const response = await fetch(`${resolveApiBase()}/embed/capacity`, {
-          method: "POST",
-          headers: {
-            Accept: "application/json",
-          },
-          body: formData,
-        });
-        const payload = await response.json().catch(() => null);
-
-        if (capacityRequestId.current !== requestId) {
-          return;
-        }
-
-        if (!response.ok) {
-          const detail =
-            payload && typeof payload.detail === "string"
-              ? payload.detail
-              : "Impossible d'évaluer la capacité du support.";
-          throw new Error(detail);
-        }
-
-        setCapacityInfo({
-          capacityBits: Number(payload.capacity_bits ?? 0),
-          maxMessageBytes: Number(payload.max_message_bytes ?? 0),
-          replicationFactor: Number(payload.replication_factor ?? 1),
-          width: Number(payload.width ?? 0),
-          height: Number(payload.height ?? 0),
-        });
-        setCapacityError(null);
-      } catch (error) {
-        if (capacityRequestId.current !== requestId) {
-          return;
-        }
-        setCapacityInfo(null);
-        setCapacityError(
-          error instanceof Error
-            ? error.message
-            : "Impossible d'évaluer la capacité du support."
-        );
-        setWasClamped(false);
-      } finally {
-        if (capacityRequestId.current === requestId) {
-          setIsCapacityLoading(false);
-        }
-      }
-    },
-    []
-  );
-
   const handleMessageInput = React.useCallback(
     (value: string) => {
-      if (capacityInfo) {
-        const limited = clampToByteLimit(value, capacityInfo.maxMessageBytes);
-        setWasClamped(limited !== value);
-        setMessage(limited);
-        return;
-      }
-      setWasClamped(false);
       setMessage(value);
     },
-    [capacityInfo]
+    []
   );
 
   const onFileChange = (targetFile: File | null) => {
@@ -224,17 +98,8 @@ function Content() {
     if (!targetFile) {
       setPreviewUrl(null);
       setFormatHint(null);
-      setCapacityInfo(null);
-      setCapacityError(null);
-      setIsCapacityLoading(false);
-      setWasClamped(false);
       return;
     }
-
-    setCapacityError(null);
-    setCapacityInfo(null);
-    setIsCapacityLoading(true);
-    setWasClamped(false);
 
     if (targetFile.type === "application/pdf") {
       setFormatHint("PDF importé : chaque page sera convertie et filigranée individuellement.");
@@ -242,20 +107,14 @@ function Content() {
     } else {
       const objectUrl = URL.createObjectURL(targetFile);
       setPreviewUrl(objectUrl);
-      if (targetFile.type === "image/png") {
-        setFormatHint(null);
-      } else {
-        setFormatHint("Suggestion : exportez en PNG pour éviter les pertes de qualité.");
-      }
+      setFormatHint(
+        targetFile.type === "image/png"
+          ? null
+          : "Suggestion : exportez en PNG pour éviter les pertes de qualité."
+      );
     }
 
-    fetchCapacity(targetFile, blockSize);
   };
-
-  React.useEffect(() => {
-    if (!file) return;
-    fetchCapacity(file, blockSize);
-  }, [blockSize, file, fetchCapacity]);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -268,35 +127,29 @@ function Content() {
       return;
     }
 
-    if (mode === "embed" && capacityInfo && capacityInfo.maxMessageBytes === 0) {
-      toast({
-        title: "Capacité insuffisante",
-        description: "Cette image est trop petite pour accueillir un message.",
-        variant: "destructive",
-      });
-      return;
-    }
-
     const formData = new FormData();
     formData.append("image", file);
-    formData.append("block_size", String(blockSize));
+    if (mode === "embed") {
+      const trimmed = message.trim();
+      if (!trimmed) {
+        toast({
+          title: "Message manquant",
+          description: "Saisissez un message avant d'intégrer le filigrane.",
+          variant: "destructive",
+        });
+        return;
+      }
+      formData.append("message", trimmed);
+    }
 
     const apiBase = resolveApiBase();
-    let url = `${apiBase}/embed`;
-    if (mode === "embed") {
-      formData.append("message", message);
-      formData.append("strength", String(strength));
-    } else {
-      url = `${apiBase}/extract`;
-    }
+    const url = `${apiBase}/${mode === "embed" ? "embed" : "extract"}`;
 
     try {
       setIsLoading(true);
       const response = await fetch(url, {
         method: "POST",
-        headers: {
-          Accept: "application/json",
-        },
+        headers: { Accept: "application/json" },
         body: formData,
       });
 
@@ -308,20 +161,40 @@ function Content() {
       const data = await response.json();
 
       if (mode === "embed") {
-        const blob = data.file_base64
-          ? base64ToBlob(data.file_base64, data.mime)
-          : new Blob([], { type: data.mime });
+        const primaryMime: string = data.mime ?? data.pdf_mime ?? "image/png";
+        const primaryBase = file.name?.split(".")[0] ?? "watermarked";
+        const primaryFilename: string = data.filename ?? `${primaryBase}.${primaryMime.split("/")[1] ?? "png"}`;
+
+        let primaryBlob: Blob | null = null;
+        if (data.file_base64) {
+          primaryBlob = base64ToBlob(data.file_base64, primaryMime);
+        }
+
+        let pdfBlob: Blob | undefined;
+        let pdfFilename: string | undefined;
+        let pdfMime: string | undefined;
+        if (data.pdf_base64) {
+          pdfMime = data.pdf_mime ?? "application/pdf";
+          pdfFilename = data.pdf_filename ?? `${primaryBase}.pdf`;
+          pdfBlob = base64ToBlob(data.pdf_base64, pdfMime);
+        }
+
+        const blob = primaryBlob ?? pdfBlob ?? new Blob([], { type: primaryMime });
+
         setEmbedResult({
-          filename: data.filename ?? "watermarked",
+          filename: primaryFilename,
           blob,
-          mime: data.mime ?? "image/png",
-          psnr: data.psnr,
+          mime: primaryMime,
+          psnr: data.psnr ?? null,
           pageCount: data.page_count,
+          pdfBlob,
+          pdfFilename,
+          pdfMime,
         });
         setExtractResult(null);
         toast({
           title: "Intégration réussie",
-          description: "Le filigrane a été inscrit dans le fichier.",
+          description: "Le texte a été intégré sous forme de calque invisible.",
         });
       } else {
         setExtractResult({
@@ -375,21 +248,21 @@ function Content() {
       <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-12 px-4 pt-16 md:flex-row md:items-start md:gap-10 md:px-10">
         <aside className="flex w-full flex-col gap-8 md:w-[32%]">
           <div className="rounded-3xl border border-border/40 bg-secondary/20 p-5 shadow-[0_30px_90px_-45px_rgba(56,189,248,0.45)] backdrop-blur">
-            <div className="flex items-center justify-between gap-3">
+            <div className="space-y-2">
               <h1 className="text-2xl font-semibold tracking-tight text-white">Watermark Tool</h1>
-              <Badge variant="outline" className="border-sky-400/60 text-sky-200">
-                Suite locale
-              </Badge>
+              <p className="text-sm text-muted-foreground">
+                Filigrane invisible hors ligne : message injecté dans les métadonnées et dupliqué par un calque imperceptible.
+              </p>
             </div>
-            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs uppercase tracking-wide text-muted-foreground/70">
+            <div className="mt-4 flex flex-wrap items-center gap-3 text-xs uppercase tracking-wide text-muted-foreground/70">
               <span className="flex items-center gap-2">
                 <span className="inline-flex h-1.5 w-1.5 rounded-full bg-sky-400" /> Formats : PNG · JPG · WebP · PDF
               </span>
               <span className="flex items-center gap-2">
-                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" /> Capacité 4096 octets max
+                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" /> Métadonnées + calque invisible
               </span>
               <span className="flex items-center gap-2">
-                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-blue-400" /> Réplique ×3 · CRC32
+                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-blue-400" /> Extraction rapide via `/extract`
               </span>
             </div>
           </div>
@@ -399,22 +272,17 @@ function Content() {
               <div className="flex items-center justify-between gap-3">
                 <h2 className="text-lg font-semibold tracking-tight text-white">Aperçu</h2>
                 <div className="flex flex-wrap items-center gap-2">
-                  {embedResult?.psnr ? <Badge>PSNR {formatPSNR(embedResult.psnr)}</Badge> : null}
+                  {embedResult?.psnr != null ? <Badge>PSNR {formatPSNR(embedResult.psnr)}</Badge> : null}
                   {extractResult ? (
                     <Badge>
                       Page {extractResult.pageIndex + 1} • Confiance {formatConfidence(extractResult.confidence)}
                     </Badge>
-                  ) : (
-                    <div className="space-y-2">
-                      <Label className="text-xs text-muted-foreground">Strength</Label>
-                      <div className="rounded-xl border border-border/50 bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
-                        Strength fixée côté serveur.
-                      </div>
-                    </div>
-                  )}
+                  ) : null}
                 </div>
               </div>
-              <p className="text-xs text-muted-foreground">Visualisez le support sélectionné et téléchargez le fichier intégré.</p>
+              <p className="text-xs text-muted-foreground">
+                Visualisez la ressource importée ; le calque caché reste invisible tout en restant récupérable par l'outil.
+              </p>
             </CardHeader>
             <CardContent className="p-6 pt-0">
               <div className="flex min-h-[220px] items-center justify-center overflow-hidden rounded-2xl border border-border/40 bg-background/40">
@@ -438,13 +306,13 @@ function Content() {
                 <Button
                   type="button"
                   variant="secondary"
-                  className="rounded-xl px-5"
-                  onClick={() => triggerDownload(embedResult.blob, embedResult.filename)}
+                  className="rounded-xl px-4"
+                  onClick={() => triggerDownload(embedResult.mime.includes("pdf") ? (embedResult.pdfBlob ?? embedResult.blob) : embedResult.blob, embedResult.mime.includes("pdf") ? (embedResult.pdfFilename ?? embedResult.filename) : embedResult.filename)}
                 >
-                  Télécharger ({embedResult.mime.split("/")[1]?.toUpperCase() ?? "fichier"})
+                  Télécharger résultat
                 </Button>
                 {embedResult.pageCount ? (
-                  <p className="text-xs text-muted-foreground">{embedResult.pageCount} page(s) filigranée(s)</p>
+                  <p className="text-xs text-muted-foreground">{embedResult.pageCount} page(s)</p>
                 ) : null}
               </CardFooter>
             ) : null}
@@ -517,7 +385,7 @@ function Content() {
                     <div className="flex items-center justify-between">
                       <Label htmlFor="message">Message à dissimuler</Label>
                       <Badge variant="outline" className="bg-background/40 font-normal">
-                        {messageBytes} / {messageLimit} octet(s)
+                        {messageBytes} octet(s)
                       </Badge>
                     </div>
                     <Textarea
@@ -528,160 +396,55 @@ function Content() {
                       rows={4}
                       required
                     />
-                    <div className="space-y-2 text-xs">
-                      {isCapacityLoading ? (
-                        <p className="rounded-xl bg-secondary/30 px-4 py-2 text-muted-foreground">
-                          Calcul de la capacité…
+                    <div className="space-y-3 text-xs text-muted-foreground">
+                      <div className="rounded-xl border border-border/40 bg-background/40 p-4 leading-relaxed">
+                        <p>
+                          Le texte est appliqué sous forme de calque répété, à très faible opacité, sur toute l'image ou chaque page du PDF.
                         </p>
-                      ) : capacityError ? (
-                        <p className="rounded-xl bg-red-500/10 px-4 py-2 text-destructive">{capacityError}</p>
-                      ) : capacityInfo ? (
-                        <div className="grid gap-2 rounded-xl border border-border/40 bg-background/40 p-4 text-muted-foreground">
-                          <div className="flex items-center justify-between gap-3">
-                            <span>Capacité disponible</span>
-                            <Badge variant="outline" className="bg-secondary/40">
-                              {capacityInfo.maxMessageBytes} octet(s)
-                            </Badge>
-                          </div>
-                          <Separator />
-                          <div className="flex items-center justify-between gap-3 text-[0.7rem] uppercase tracking-wide text-muted-foreground/70">
-                            <span>Dimensions traitées</span>
-                            <span>
-                              {capacityInfo.width} × {capacityInfo.height} px
-                            </span>
-                          </div>
-                          <Separator />
-                          <div className="flex items-center justify-between gap-3">
-                            <span>Message actuel</span>
-                            <Badge variant="outline" className="bg-secondary/30">
-                              {messageBytes} octet(s)
-                            </Badge>
-                          </div>
-                        </div>
-                      ) : file ? (
-                        <p className="rounded-xl bg-secondary/30 px-4 py-2 text-muted-foreground">
-                          Capacité en cours d'évaluation…
+                        <p className="mt-2 text-[0.7rem] uppercase tracking-wide text-muted-foreground/70">
+                          Pas de limite stricte, mais privilégiez des messages courts pour rester discret.
                         </p>
-                      ) : (
-                        <p className="rounded-xl bg-background/40 px-4 py-2 text-muted-foreground">
-                          Importez un fichier pour calculer la capacité disponible.
-                        </p>
-                      )}
-                      {wasClamped && !isCapacityLoading && !capacityError ? (
-                        <p className="rounded-full bg-blue-500/15 px-4 py-1.5 text-center text-sky-200">
-                          Le message a été ajusté pour respecter la limite de capacité.
-                        </p>
-                      ) : null}
-                      {isCapacityZero && !isCapacityLoading && !capacityError ? (
-                        <p className="rounded-full bg-red-500/15 px-4 py-1.5 text-center text-destructive">
-                          L'image sélectionnée est trop petite. Choisissez un support plus grand.
-                        </p>
-                      ) : null}
-                      {isAtByteLimit && !isCapacityZero && !isCapacityLoading && !capacityError ? (
-                        <p className="rounded-full bg-emerald-500/15 px-4 py-1.5 text-center text-emerald-200">
-                          Capacité maximale atteinte. Ajoutez une image plus grande pour davantage de texte.
-                        </p>
-                      ) : null}
+                      </div>
                     </div>
+
+                    <p className="rounded-xl border border-border/40 bg-background/40 p-4 text-xs text-muted-foreground">
+                      Le texte invisible est positionné automatiquement avec une police minuscule et une opacité quasi nulle afin qu'il reste imperceptible.
+                    </p>
                   </div>
                 ) : null}
-
-                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                  {mode === "embed" ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label htmlFor="strength">Strength</Label>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <button
-                              type="button"
-                              className="rounded-full p-1 text-muted-foreground transition hover:text-foreground"
-                              aria-label="Informations sur la strength"
-                            >
-                              <Info className="h-4 w-4" />
-                            </button>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            Intensité de la modification des coefficients DCT. Plus fort = extraction plus robuste mais risque de baisse du PSNR.
-                          </TooltipContent>
-                        </Tooltip>
-                      </div>
-                      <Input
-                        id="strength"
-                        type="number"
-                        step="0.1"
-                        min={STRENGTH_MIN}
-                        max={STRENGTH_MAX}
-                        value={strength}
-                        onChange={(event) => setStrength(Number(event.target.value))}
-                      />
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <Label className="text-xs text-muted-foreground">&nbsp;</Label>
-                      <div className="rounded-xl border border-border/50 bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
-                        Strength utilisée côté serveur.
-                      </div>
-                    </div>
-                  ) : null}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="blockSize">Bloc</Label>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            type="button"
-                            className="rounded-full p-1 text-muted-foreground transition hover:text-foreground"
-                            aria-label="Informations sur la taille de bloc"
-                          >
-                            <Info className="h-4 w-4" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          Taille des blocs appliqués sur la sous-bande LL. Des blocs plus grands offrent plus de capacité mais réagissent différemment aux attaques.
-                        </TooltipContent>
-                      </Tooltip>
-                    </div>
-                    <Select
-                      id="blockSize"
-                      value={String(blockSize)}
-                      onChange={(event) => setBlockSize(Number(event.target.value))}
-                    >
-                      {BLOCK_OPTIONS.map((size) => (
-                        <option key={size} value={String(size)}>
-                          {size}
-                        </option>
-                      ))}
-                    </Select>
-                  </div>
-                </div>
 
                 <Button
                   type="submit"
                   className="self-start rounded-xl px-6 py-2.5 shadow-[0_18px_40px_-28px_rgba(59,130,246,0.75)]"
-                  disabled={isLoading || (mode === "embed" && (isCapacityLoading || isCapacityZero))}
+                  disabled={isLoading || (mode === "embed" && message.trim().length === 0)}
                 >
                   {mode === "embed" ? "Lancer l'intégration" : "Lancer l'extraction"}
                 </Button>
 
                 {mode === "embed" && embedResult ? (
                   <div className="rounded-2xl border border-primary/40 bg-primary/5 px-5 py-4 text-sm text-muted-foreground">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center justify-between gap-4">
                       <div className="space-y-1">
                         <p className="text-xs uppercase tracking-wide text-primary/90">Fichier prêt</p>
                         <p className="text-sm text-primary/80">
-                          {embedResult.mime.split("/")[1]?.toUpperCase()} généré avec PSNR {formatPSNR(embedResult.psnr)}
+                          {embedResult.mime.includes("pdf") ? "PDF" : "PNG"} prêt à l'envoi
+                          {embedResult.psnr != null ? ` • PSNR ${formatPSNR(embedResult.psnr)}` : ""}
                         </p>
                         {embedResult.pageCount ? (
-                          <p className="text-xs text-primary/70">{embedResult.pageCount} page(s) filigranée(s)</p>
+                          <p className="text-xs text-primary/70">{embedResult.pageCount} page(s)</p>
                         ) : null}
                       </div>
                       <Button
                         type="button"
-                        className="rounded-xl px-5"
-                        onClick={() => triggerDownload(embedResult.blob, embedResult.filename)}
+                        className="rounded-xl px-4"
+                        onClick={() =>
+                          triggerDownload(
+                            embedResult.mime.includes("pdf") ? (embedResult.pdfBlob ?? embedResult.blob) : embedResult.blob,
+                            embedResult.mime.includes("pdf") ? (embedResult.pdfFilename ?? embedResult.filename) : embedResult.filename,
+                          )
+                        }
                       >
-                        Télécharger
+                        Télécharger {embedResult.mime.includes("pdf") ? "PDF" : "PNG"}
                       </Button>
                     </div>
                   </div>
@@ -719,9 +482,7 @@ function Content() {
 export default function Page() {
   return (
     <ToastProvider>
-      <TooltipProvider delayDuration={150} skipDelayDuration={200}>
-        <Content />
-      </TooltipProvider>
+      <Content />
     </ToastProvider>
   );
 }

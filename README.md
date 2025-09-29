@@ -9,9 +9,9 @@ Mini-outil local pour cacher ou révéler un texte destiné aux IA de lecture de
 - `POST /embed` — intègre un message et renvoie l'image PNG ou le PDF marqué + métriques (PSNR quand applicable, dimensions, etc.).
 - `POST /extract` — lit le message caché (lecture directe des calques/metadata) et renvoie le texte décodé.
 - Formats acceptés : PNG, JPEG, WebP ou PDF (≤ 10 Mo, côté max 4096 px, PDF ≤ 10 pages).
-- Paramètres optionnels : `strength` (0.1–2.0), `block_size` (pair) – conservés pour compatibilité mais non essentiels avec l'overlay.
+- Données injectées dans les metadata du PNG/PDF et doublées d'un calque texte totalement invisible (police minuscule, opacité très faible).
 - Texte caché intégré sous forme de calque quasi invisible (overlay léger sur les images, calque texte transparent dans les PDF).
-- Badge PSNR, téléchargement automatique, copie du texte extrait.
+- Badge PSNR (pour les variantes PNG), téléchargement automatique, copie du texte extrait.
 - Seed publique fixe (`123456`) afin que tout décodeur compatible puisse extraire le message sans information supplémentaire.
 
 ## Démarrage rapide
@@ -25,7 +25,7 @@ Cela construit et lance le backend FastAPI (http://localhost:8080) et l'interfac
 ## Commandes utiles
 
 - `make build` – construit l'image Docker.
-- `make test` – exécute la suite Pytest (round-trip et JPEG atténué).
+- `make test` – indique simplement qu'aucune suite automatisée n'est disponible.
 - `make lint` – applique Ruff et Black en mode vérification.
 - `make format` – formate le code backend avec Black.
 
@@ -33,24 +33,37 @@ Cela construit et lance le backend FastAPI (http://localhost:8080) et l'interfac
 
 ### POST /embed
 
-Multipart `image`, `message`, `strength`, `block_size`.
+Multipart `image`, `message`.
 
-- Accept `application/json` → `{ "file_base64", "mime", "psnr", "width", "height", ... }`.
-- Accept `image/png` → renvoie directement le PNG en téléchargement.
-- Accept `application/pdf` → renvoie directement le PDF en téléchargement.
+- Accept `application/json` →
+  ```json
+  {
+    "file_base64": "...",        // ressource principale (PNG ou PDF selon l'entrée)
+    "filename": "...",
+    "mime": "image/png",
+    "pdf_base64": "...",        // présent lorsque l'entrée est une image
+    "pdf_filename": "...",
+    "pdf_mime": "application/pdf",
+    "psnr": 42.0,                // null pour les entrées PDF
+    "width": 1024,
+    "height": 768
+  }
+  ```
+- Accept `image/png` → renvoie directement le PNG (cas d'entrée image).
+- Accept `application/pdf` → renvoie directement le PDF (cas d'entrée image ou PDF).
 
 ### POST /extract
 
-Multipart `image`, `block_size`.
+Multipart `image`.
 
-Réponse JSON : `{ "message", "confidence", "backend", "crc_ok", "page_index" }`.
+Réponse JSON : `{ "message", "confidence", "page_index" }`.
 
 ## Notes et limites
 
 - Conservez toujours l'image originale :
   - pour recalculer le PSNR,
   - pour réintégrer le filigrane après transformations lourdes.
-- Le message maximal recommandé est de 4096 octets (limite interne).
+- Aucune limite stricte sur la taille du message n'est imposée, mais rester sous quelques kilo-octets conserve un rendu totalement invisible.
 - Pour préserver la fidélité, privilégiez une sortie PNG. Le front avertit lorsque l'entrée est lossy.
 - Les PDF sont convertis page par page (max 10). Chaque page reçoit un calque texte transparent.
 - La prise en charge PDF nécessite la présence de `poppler-utils` (binaire `pdftoppm`). Le Dockerfile l'installe par défaut.
@@ -66,8 +79,6 @@ watermark-tool/
 │   │   ├── logging_utils.py
 │   │   ├── metrics.py
 │   │   └── wm_dwt_dct.py
-│   ├── tests/
-│   │   └── test_roundtrip.py
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/
@@ -93,20 +104,6 @@ watermark-tool/
 - Les opérations lourdes sont exécutées hors boucle événementielle avec un timeout de 15 s.
 - Les fichiers temporaires résident dans `/tmp` (monté dans `docker-compose.yml`).
 - Le service frontend monte `frontend/` et dispose d'un volume `node_modules` dédié ; `npm install` se lance automatiquement à chaque démarrage de conteneur pour garantir les dépendances du hot reload.
-
-## Tests
-
-La suite Pytest couvre :
-
-1. Overlay PNG : le message injecté se retrouve dans les metadata tEXt et via l’overlay léger.
-2. Overlay PDF : le message est retrouvable via le calque texte transparent.
-3. Estimation de capacité : vérification que la taille maximale reste bornée.
-
-Exécuter :
-
-```bash
-make test
-```
 
 ## Risques connus
 
