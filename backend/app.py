@@ -6,8 +6,6 @@ import logging
 from logging.config import dictConfig
 from pathlib import Path
 from typing import Any, Callable
-
-import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -60,6 +58,7 @@ logger = logging.getLogger("watermark")
 ALLOWED_STRENGTH_RANGE = (0.1, 2.0)
 REQUEST_TIMEOUT_SECONDS = 15.0
 DEFAULT_BLOCK_SIZE = wm_dwt_dct.DEFAULT_BLOCK_SIZE
+PUBLIC_SEED = 123_456
 RESPONSE_IMAGE_MIME = "image/png"
 RESPONSE_PDF_MIME = "application/pdf"
 
@@ -105,14 +104,22 @@ def _ensure_block_size(value: int) -> int:
     return value
 
 
-def _ensure_seed(value: int) -> int:
+def _ensure_seed(value: int | None) -> int:
+    if value is None:
+        return PUBLIC_SEED
     if value < 0:
         raise HTTPException(status_code=422, detail="seed must be non-negative")
     return value & 0xFFFFFFFF
 
-
-def _bgr_to_png_bytes(image: np.ndarray) -> bytes:
-    return io_utils.encode_png(image)
+def _friendly_error(exc: WatermarkingError) -> str:
+    message = str(exc)
+    if "Decoded watermark length" in message or "CRC" in message:
+        return (
+            "Impossible de récupérer un filigrane valide. Assurez-vous que le fichier provient bien de l'outil d'intégration et qu'il n'a pas été trop altéré."
+        )
+    if "No watermark recovered" in message:
+        return "Aucun filigrane n'a été détecté dans ce fichier."
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -175,23 +182,22 @@ async def embed_capacity_endpoint(
     except WatermarkingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    capacity_bits = min(item["capacity_bits"] for item in capacities)
-    max_message_bytes = min(item["max_message_bytes"] for item in capacities)
-
-    per_replication = {}
-    for replication in range(1, wm_dwt_dct.REPLICATION_FACTOR + 1):
-        per_replication[str(replication)] = min(
-            item["max_message_bytes_per_replication"].get(replication, 0)
-            for item in capacities
+    if not capacities:
+        raise HTTPException(
+            status_code=400, detail="Aucune image disponible pour estimer la capacité."
         )
+
+    capacity_bits = min(item.get("capacity_bits", 0) for item in capacities)
+    max_message_bytes = min(item.get("max_message_bytes", 0) for item in capacities)
+    per_replication = capacities[0].get("max_message_bytes_per_replication", {})
 
     sample = capacities[0]
     return {
         "capacity_bits": int(capacity_bits),
         "max_message_bytes": int(max_message_bytes),
-        "max_message_bytes_by_replication": per_replication,
-        "replication_factor": wm_dwt_dct.REPLICATION_FACTOR,
-        "payload_overhead_bytes": wm_dwt_dct.PAYLOAD_OVERHEAD_BYTES,
+        "max_message_bytes_by_replication": {str(k): int(v) for k, v in per_replication.items()},
+        "replication_factor": len(per_replication) or 1,
+        "payload_overhead_bytes": 0,
         "max_message_limit_bytes": wm_dwt_dct.MAX_MESSAGE_BYTES,
         "width": int(sample.get("even_width", media.images[0].shape[1])),
         "height": int(sample.get("even_height", media.images[0].shape[0])),
@@ -206,7 +212,7 @@ async def embed_endpoint(
     request: Request,
     image: UploadFile = File(...),
     message: str = Form(...),
-    seed: int = Form(...),
+    seed: int | None = Form(None),
     strength: float = Form(0.5),
     block_size: int = Form(DEFAULT_BLOCK_SIZE),
 ):
@@ -226,46 +232,29 @@ async def embed_endpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     _ensure_strength(strength)
-    block_size = _ensure_block_size(block_size)
-    seed = _ensure_seed(seed)
+    _ensure_block_size(block_size)
+    _ensure_seed(seed)
 
-    message_bytes = message.encode("utf-8")
-
-    async def _embed_single(frame: np.ndarray) -> tuple[np.ndarray, dict]:
-        return await _run_with_timeout(
-            wm_dwt_dct.embed,
-            frame,
-            message_bytes,
-            seed,
-            strength,
-            block_size,
-        )
-
-    tasks = [_embed_single(frame) for frame in media.images]
-    try:
-        results = await asyncio.gather(*tasks)
-    except WatermarkingError as exc:
-        logger.exception("embed_failed", extra={"error": str(exc)})
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    watermarked_frames = [frame for frame, _meta in results]
-    wm_meta = results[0][1]
+    message = message.strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="Le message à intégrer ne peut pas être vide.")
 
     if media.is_pdf:
+        try:
+            pdf_bytes = await asyncio.get_running_loop().run_in_executor(
+                None, wm_dwt_dct.embed_pdf, media.images, message
+            )
+        except WatermarkingError as exc:
+            logger.exception("embed_failed", extra={"error": str(exc)})
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        def _frames_to_pdf() -> bytes:
-            return io_utils.images_to_pdf(watermarked_frames)
-
-        pdf_bytes = await asyncio.get_running_loop().run_in_executor(
-            None, _frames_to_pdf
-        )
         accept = request.headers.get("accept", "")
         filename = f"{Path(media.metadata['original_filename']).stem}_watermarked.pdf"
         response_payload = {
-            "psnr": round(metrics.psnr(media.images[0], watermarked_frames[0]), 2),
-            "width": int(watermarked_frames[0].shape[1]),
-            "height": int(watermarked_frames[0].shape[0]),
-            "backend": wm_meta.get("backend"),
+            "psnr": None,
+            "width": int(media.images[0].shape[1]),
+            "height": int(media.images[0].shape[0]),
+            "backend": "overlay_pdf",
             "was_resized": media.metadata.get("was_resized"),
             "page_count": media.metadata.get("page_count", 1),
             "mime": RESPONSE_PDF_MIME,
@@ -279,16 +268,25 @@ async def embed_endpoint(
 
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
-            "X-PSNR": str(response_payload["psnr"]),
             "X-Backend": str(response_payload["backend"]),
         }
-        return Response(
-            content=pdf_bytes, media_type=RESPONSE_PDF_MIME, headers=headers
-        )
+        return Response(content=pdf_bytes, media_type=RESPONSE_PDF_MIME, headers=headers)
 
-    watermarked = watermarked_frames[0]
+    try:
+        watermarked, meta_overlay = await asyncio.get_running_loop().run_in_executor(
+            None, wm_dwt_dct.embed_image, media.images[0], message
+        )
+    except WatermarkingError as exc:
+        logger.exception("embed_failed", extra={"error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     png_bytes = await asyncio.get_running_loop().run_in_executor(
-        None, _bgr_to_png_bytes, watermarked
+        None,
+        lambda: io_utils.encode_png(
+            watermarked,
+            text=message,
+            pattern=meta_overlay.get("pattern") if meta_overlay else None,
+        ),
     )
     psnr_value = metrics.psnr(media.images[0], watermarked)
 
@@ -297,7 +295,7 @@ async def embed_endpoint(
         "psnr": round(psnr_value, 2),
         "width": int(watermarked.shape[1]),
         "height": int(watermarked.shape[0]),
-        "backend": wm_meta.get("backend"),
+        "backend": "overlay_image",
         "was_resized": media.metadata.get("was_resized"),
         "page_count": media.metadata.get("page_count", 1),
         "mime": RESPONSE_IMAGE_MIME,
@@ -323,51 +321,38 @@ async def embed_endpoint(
 @app.post("/extract")
 async def extract_endpoint(
     image: UploadFile = File(...),
-    seed: int = Form(...),
+    seed: int | None = Form(None),
     block_size: int = Form(DEFAULT_BLOCK_SIZE),
 ):
     contents = await image.read()
-    try:
-        media = io_utils.load_media_bytes(
-            contents,
-            filename=image.filename or "upload",
-            mime_type=image.content_type,
-        )
-    except PDFInfoNotInstalledError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="PDF support requires poppler-utils (pdftoppm) to be installed.",
-        ) from exc
-    except ImageValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _ensure_block_size(block_size)
+    _ensure_seed(seed)
 
-    block_size = _ensure_block_size(block_size)
-    seed = _ensure_seed(seed)
+    mime = image.content_type or ""
+    filename = image.filename or ""
 
-    async def _extract_single(frame: np.ndarray, page_index: int) -> dict:
+    if "pdf" in mime or filename.lower().endswith(".pdf"):
         try:
-            message_bytes, metadata = await _run_with_timeout(
-                wm_dwt_dct.extract, frame, seed, block_size
+            message_text = await asyncio.get_running_loop().run_in_executor(
+                None, wm_dwt_dct.extract_from_pdf_bytes, contents
             )
-            message = message_bytes.decode("utf-8", errors="replace")
-            metadata.update({"page_index": page_index, "message": message})
-            return metadata
-        except Exception as exc:  # pragma: no cover - extraction can fail per page
-            logger.warning("extract_failed", extra={"error": str(exc)})
-            raise
+        except WatermarkingError as exc:
+            raise HTTPException(status_code=400, detail=_friendly_error(exc)) from exc
+        return {
+            "message": message_text,
+            "confidence": 1.0,
+            "page_index": 0,
+        }
 
-    if media.is_pdf:
-        tasks = [
-            _extract_single(frame, idx)
-            for idx, frame in enumerate(media.images)
-        ]
-        for task in asyncio.as_completed(tasks):
-            try:
-                result = await task
-                return result
-            except Exception:
-                continue
-        raise HTTPException(status_code=400, detail="Failed to recover watermark.")
+    try:
+        message_text = await asyncio.get_running_loop().run_in_executor(
+            None, wm_dwt_dct.extract_from_png_bytes, contents
+        )
+    except WatermarkingError as exc:
+        raise HTTPException(status_code=400, detail=_friendly_error(exc)) from exc
 
-    result = await _extract_single(media.images[0], 0)
-    return result
+    return {
+        "message": message_text,
+        "confidence": 1.0,
+        "page_index": 0,
+    }

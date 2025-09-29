@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from pdf2image import convert_from_bytes
 from pdf2image.exceptions import PDFInfoNotInstalledError
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_SIDE = 4096
@@ -83,11 +83,20 @@ def load_image_bytes(
     return _load_image(data, filename=filename, ext=ext, max_side=max_side)
 
 
-def encode_png(image: np.ndarray) -> bytes:
-    success, buffer = cv2.imencode(".png", image)
-    if not success:
-        raise RuntimeError("Failed to encode PNG output.")
-    return buffer.tobytes()
+def encode_png(image: np.ndarray, text: str | None = None, pattern: str | None = None) -> bytes:
+    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(img_rgb)
+    buffer = BytesIO()
+    if text or pattern:
+        pnginfo = PngImagePlugin.PngInfo()
+        if text:
+            pnginfo.add_text("wm_message", text)
+        if pattern:
+            pnginfo.add_text("wm_pattern", pattern)
+        pil_image.save(buffer, format="PNG", pnginfo=pnginfo)
+    else:
+        pil_image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def is_lossy_extension(ext: str | None) -> bool:

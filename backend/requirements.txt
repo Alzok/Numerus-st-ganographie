@@ -4,10 +4,9 @@ python-multipart==0.0.9
 pydantic==2.7.0
 numpy==1.26.4
 opencv-python-headless==4.9.0.80
-pywavelets==1.5.0
 pillow==10.3.0
 pdf2image==1.17.0
-imwatermark==0.0.2
+PyMuPDF==1.23.8
 ruff==0.3.4
 black==24.4.2
 pytest==8.1.1

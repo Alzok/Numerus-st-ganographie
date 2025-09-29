@@ -1,18 +1,18 @@
 # Watermark Tool
 
-Mini-outil local pour intégrer ou extraire un texte caché dans une image en utilisant un filigrane fréquentiel (DWT + DCT). L'ensemble tourne en local via Docker, sans persistance.
+Mini-outil local pour cacher ou révéler un texte destiné aux IA de lecture de documents : le message est ajouté sous forme de calque quasi invisible (overlay léger pour les images, texte transparent pour les PDF). L'ensemble tourne en local via Docker, sans persistance.
 
 ## Fonctionnalités
 
 - Interface web Next.js + React (design shadcn/UI) servie sur http://localhost:3000 avec rechargement à chaud.
 - API REST :
-  - `POST /embed` — intègre un message et renvoie l'image PNG ou le PDF marqué + métriques (PSNR, dimensions, nombre de pages).
-  - `POST /extract` — extrait le message caché et renvoie la confiance calculée via CRC32.
+- `POST /embed` — intègre un message et renvoie l'image PNG ou le PDF marqué + métriques (PSNR quand applicable, dimensions, etc.).
+- `POST /extract` — lit le message caché (lecture directe des calques/metadata) et renvoie le texte décodé.
 - Formats acceptés : PNG, JPEG, WebP ou PDF (≤ 10 Mo, côté max 4096 px, PDF ≤ 10 pages).
-- Paramètres contrôlables : `seed`, `strength` (0.1–2.0), `block_size` (pair).
+- Paramètres optionnels : `strength` (0.1–2.0), `block_size` (pair) – conservés pour compatibilité mais non essentiels avec l'overlay.
+- Texte caché intégré sous forme de calque quasi invisible (overlay léger sur les images, calque texte transparent dans les PDF).
 - Badge PSNR, téléchargement automatique, copie du texte extrait.
-- Filigrane répliqué automatiquement (jusqu'à ×3) pour renforcer la détection après recompression.
-- Fallback interne si `imwatermark` est indisponible (PyWavelets + OpenCV DCT).
+- Seed publique fixe (`123456`) afin que tout décodeur compatible puisse extraire le message sans information supplémentaire.
 
 ## Démarrage rapide
 
@@ -33,7 +33,7 @@ Cela construit et lance le backend FastAPI (http://localhost:8080) et l'interfac
 
 ### POST /embed
 
-Multipart `image`, `message`, `seed`, `strength`, `block_size`.
+Multipart `image`, `message`, `strength`, `block_size`.
 
 - Accept `application/json` → `{ "file_base64", "mime", "psnr", "width", "height", ... }`.
 - Accept `image/png` → renvoie directement le PNG en téléchargement.
@@ -41,7 +41,7 @@ Multipart `image`, `message`, `seed`, `strength`, `block_size`.
 
 ### POST /extract
 
-Multipart `image`, `seed`, `block_size`.
+Multipart `image`, `block_size`.
 
 Réponse JSON : `{ "message", "confidence", "backend", "crc_ok", "page_index" }`.
 
@@ -52,10 +52,8 @@ Réponse JSON : `{ "message", "confidence", "backend", "crc_ok", "page_index" }`
   - pour réintégrer le filigrane après transformations lourdes.
 - Le message maximal recommandé est de 4096 octets (limite interne).
 - Pour préserver la fidélité, privilégiez une sortie PNG. Le front avertit lorsque l'entrée est lossy.
-- Les PDF sont convertis page par page (max 10). Chaque page est filigranée avec le même message.
+- Les PDF sont convertis page par page (max 10). Chaque page reçoit un calque texte transparent.
 - La prise en charge PDF nécessite la présence de `poppler-utils` (binaire `pdftoppm`). Le Dockerfile l'installe par défaut.
-- Performance validée : message de 128 caractères intégré dans une image 1920×1080 en < 2 s sur CPU standard.
-- Après recompression JPEG qualité 85, ≥ 90 % des bits sont récupérés (test automatique `test_roundtrip_after_jpeg`).
 
 ## Structure
 
@@ -100,8 +98,9 @@ watermark-tool/
 
 La suite Pytest couvre :
 
-1. Round-trip propre (message identique, PSNR ≥ 38 dB).
-2. Extraction après recompression JPEG qualité 85 avec ≥ 90 % de précision binaire.
+1. Overlay PNG : le message injecté se retrouve dans les metadata tEXt et via l’overlay léger.
+2. Overlay PDF : le message est retrouvable via le calque texte transparent.
+3. Estimation de capacité : vérification que la taille maximale reste bornée.
 
 Exécuter :
 

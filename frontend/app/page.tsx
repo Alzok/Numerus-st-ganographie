@@ -16,7 +16,6 @@ import { ToastProvider, useToast } from "@/components/ui/use-toast";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 
-const SEED_STORAGE_KEY = "wm-seed";
 const BLOCK_OPTIONS = [8, 12, 16];
 const STRENGTH_MIN = 0.1;
 const STRENGTH_MAX = 2.0;
@@ -104,11 +103,6 @@ function Content() {
   const [mode, setMode] = React.useState<Mode>("embed");
   const [message, setMessage] = React.useState(DEFAULT_MESSAGE);
   const [messageBytes, setMessageBytes] = React.useState(() => countMessageBytes(DEFAULT_MESSAGE));
-  const [seed, setSeed] = React.useState<number>(() => {
-    if (typeof window === "undefined") return Math.floor(Math.random() * 10_000_000);
-    const stored = window.localStorage.getItem(SEED_STORAGE_KEY);
-    return stored ? Number.parseInt(stored, 10) : Math.floor(Math.random() * 10_000_000);
-  });
   const [strength, setStrength] = React.useState(0.5);
   const [blockSize, setBlockSize] = React.useState(8);
   const [file, setFile] = React.useState<File | null>(null);
@@ -127,11 +121,6 @@ function Content() {
   const messageLimit = maxMessageBytes ?? MESSAGE_LIMIT;
   const isCapacityZero = maxMessageBytes === 0;
   const isAtByteLimit = capacityInfo ? messageBytes === capacityInfo.maxMessageBytes : false;
-
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(SEED_STORAGE_KEY, String(seed));
-  }, [seed]);
 
   React.useEffect(() => {
     setMessageBytes(countMessageBytes(message));
@@ -290,7 +279,6 @@ function Content() {
 
     const formData = new FormData();
     formData.append("image", file);
-    formData.append("seed", String(seed));
     formData.append("block_size", String(blockSize));
 
     const apiBase = resolveApiBase();
@@ -386,52 +374,25 @@ function Content() {
 
       <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-12 px-4 pt-16 md:flex-row md:items-start md:gap-10 md:px-10">
         <aside className="flex w-full flex-col gap-8 md:w-[32%]">
-          <Card className="border border-border/40 bg-secondary/20 p-0 shadow-[0_30px_90px_-45px_rgba(56,189,248,0.45)] backdrop-blur">
-            <CardContent className="flex flex-col gap-6 p-8">
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="border-sky-400/60 text-sky-200">
-                  Suite locale – Encryption Light
-                </Badge>
-              </div>
-              <h1 className="text-3xl font-semibold tracking-tight text-white md:text-[2.6rem]">
-                Filigrane fréquentiel nouvelle génération
-              </h1>
-              <p className="max-w-xl text-sm leading-relaxed text-muted-foreground">
-                Intégrez ou extrayez un message robuste dans vos images et PDF sans quitter votre machine. Chaque action est traitée en local, sans fuite de données.
-              </p>
-              <div className="grid gap-3 rounded-2xl border border-border/40 bg-background/35 p-4 text-sm text-muted-foreground">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground/70">Formats pris en charge</span>
-                  <Badge variant="outline" className="bg-secondary/40">
-                    PNG · JPG · WebP · PDF
-                  </Badge>
-                </div>
-                <Separator />
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground/70">Capacité maximale</span>
-                  <Badge variant="outline" className="bg-secondary/40">
-                    4096 octets / message
-                  </Badge>
-                </div>
-                <Separator />
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground/70">Robustesse</span>
-                  <Badge variant="outline" className="bg-secondary/40">
-                    Réplique ×3 · CRC32
-                  </Badge>
-                </div>
-              </div>
-              <Separator className="opacity-50" />
-              <div className="flex flex-wrap items-center gap-4 text-[0.7rem] tracking-wide text-muted-foreground/70">
-                <span className="flex items-center gap-2">
-                  <span className="inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" /> Temps réel Next.js · FastAPI (timeout 15 s)
-                </span>
-                <span className="flex items-center gap-2">
-                  <span className="inline-flex h-1.5 w-1.5 rounded-full bg-sky-400" /> JPEG quali ≥ 85 conseillé · PDF ≤ 10 pages
-                </span>
-              </div>
-            </CardContent>
-          </Card>
+          <div className="rounded-3xl border border-border/40 bg-secondary/20 p-5 shadow-[0_30px_90px_-45px_rgba(56,189,248,0.45)] backdrop-blur">
+            <div className="flex items-center justify-between gap-3">
+              <h1 className="text-2xl font-semibold tracking-tight text-white">Watermark Tool</h1>
+              <Badge variant="outline" className="border-sky-400/60 text-sky-200">
+                Suite locale
+              </Badge>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs uppercase tracking-wide text-muted-foreground/70">
+              <span className="flex items-center gap-2">
+                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-sky-400" /> Formats : PNG · JPG · WebP · PDF
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" /> Capacité 4096 octets max
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-blue-400" /> Réplique ×3 · CRC32
+              </span>
+            </div>
+          </div>
 
           <Card className="border border-border/40 bg-secondary/25 p-0 shadow-[0_20px_80px_-55px_rgba(59,130,246,0.55)]">
             <CardHeader className="flex flex-col gap-2 p-6 pb-3">
@@ -443,7 +404,14 @@ function Content() {
                     <Badge>
                       Page {extractResult.pageIndex + 1} • Confiance {formatConfidence(extractResult.confidence)}
                     </Badge>
-                  ) : null}
+                  ) : (
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground">Strength</Label>
+                      <div className="rounded-xl border border-border/50 bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
+                        Strength fixée côté serveur.
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">Visualisez le support sélectionné et téléchargez le fichier intégré.</p>
@@ -618,34 +586,7 @@ function Content() {
                   </div>
                 ) : null}
 
-                <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="seed">Seed</Label>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            type="button"
-                            className="rounded-full p-1 text-muted-foreground transition hover:text-foreground"
-                            aria-label="Informations sur la seed"
-                          >
-                            <Info className="h-4 w-4" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          Grâce à la seed, le placement des bits est pseudo-aléatoire. Utilisez la même valeur pour extraire le message.
-                        </TooltipContent>
-                      </Tooltip>
-                    </div>
-                    <Input
-                      id="seed"
-                      type="number"
-                      value={seed}
-                      min={0}
-                      onChange={(event) => setSeed(Number(event.target.value))}
-                      required
-                    />
-                  </div>
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
                   {mode === "embed" ? (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
@@ -682,7 +623,7 @@ function Content() {
                         Strength utilisée côté serveur.
                       </div>
                     </div>
-                  )}
+                  ) : null}
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <Label htmlFor="blockSize">Bloc</Label>
@@ -722,6 +663,29 @@ function Content() {
                 >
                   {mode === "embed" ? "Lancer l'intégration" : "Lancer l'extraction"}
                 </Button>
+
+                {mode === "embed" && embedResult ? (
+                  <div className="rounded-2xl border border-primary/40 bg-primary/5 px-5 py-4 text-sm text-muted-foreground">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <p className="text-xs uppercase tracking-wide text-primary/90">Fichier prêt</p>
+                        <p className="text-sm text-primary/80">
+                          {embedResult.mime.split("/")[1]?.toUpperCase()} généré avec PSNR {formatPSNR(embedResult.psnr)}
+                        </p>
+                        {embedResult.pageCount ? (
+                          <p className="text-xs text-primary/70">{embedResult.pageCount} page(s) filigranée(s)</p>
+                        ) : null}
+                      </div>
+                      <Button
+                        type="button"
+                        className="rounded-xl px-5"
+                        onClick={() => triggerDownload(embedResult.blob, embedResult.filename)}
+                      >
+                        Télécharger
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
               </form>
             </CardContent>
           </Card>
